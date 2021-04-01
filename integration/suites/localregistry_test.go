@@ -3,6 +3,7 @@
 package suites
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"path/filepath"
@@ -236,7 +237,7 @@ func (s *localRegistrySuite) SetupSuite() {
 		},
 		s.CreateFlags...,
 	)
-	err = common.RunBuildkit("create", args)
+	err = common.RunBuildkit("create", args, common.RunBuildStreams{})
 	require.NoError(s.T(), err, "%s: builder creation failed", s.Name)
 }
 
@@ -267,7 +268,7 @@ func (s *localRegistrySuite) TearDownSuite() {
 		logrus.Infof("%s: Removing builder", s.Name)
 		err = common.RunBuildkit("rm", []string{
 			s.Name,
-		})
+		}, common.RunBuildStreams{})
 		if err != nil {
 			logrus.Warnf("failed to clean up builder %s", err)
 		}
@@ -288,7 +289,7 @@ func (s *localRegistrySuite) TestBuildWithPush() {
 		"--tag", imageName,
 		dir,
 	}
-	err = common.RunBuild(args)
+	err = common.RunBuild(args, common.RunBuildStreams{})
 	require.NoError(s.T(), err, "build failed")
 	// Note, we can't run the image we just built since it was pushed to the local registry, which isn't ~directly visible to the runtime
 }
@@ -318,14 +319,14 @@ func (s *localRegistrySuite) TestBuildWithCacheScenarios() {
 		"--cache-to", "type=registry,ref=" + cacheName,
 		dir,
 	}
-	err = common.RunBuild(args)
+	err = common.RunBuild(args, common.RunBuildStreams{})
 	require.NoError(s.T(), err, "cache-to only build failed")
 
 	// Now do another build with cache-to and cache-from
 	args = append(args,
 		"--cache-from", "type=registry,ref="+cacheName,
 	)
-	err = common.RunBuild(args)
+	err = common.RunBuild(args, common.RunBuildStreams{})
 	require.NoError(s.T(), err, "cache-to/from build failed")
 
 	// Do a build with inline caching
@@ -337,7 +338,7 @@ func (s *localRegistrySuite) TestBuildWithCacheScenarios() {
 		"--cache-from", "type=registry,ref=" + cacheName,
 		dir,
 	}
-	err = common.RunBuild(args)
+	err = common.RunBuild(args, common.RunBuildStreams{})
 	require.NoError(s.T(), err, "inline cache build failed")
 
 	// Note, we can't run the image we just built since it was pushed to the local registry, which isn't ~directly visible to the runtime
@@ -354,7 +355,7 @@ func (s *localRegistrySuite) TestBuildPushWithoutTag() {
 		"--push",
 		dir,
 	}
-	err = common.RunBuild(args)
+	err = common.RunBuild(args, common.RunBuildStreams{})
 	require.Error(s.T(), err)
 	require.Contains(s.T(), err.Error(), "tag is needed when pushing to registry")
 }
@@ -402,10 +403,22 @@ func main() {
 		"--platform", "linux/386,linux/amd64,linux/arm/v6,linux/arm/v7,linux/arm64,windows/amd64",
 		dir,
 	}
-	err = common.RunBuild(args)
+	err = common.RunBuild(args, common.RunBuildStreams{})
 	require.NoError(s.T(), err, "cross-compile multi-arch build failed")
 
 	// TODO - need to poke at the resulting image to make sure it was actually correctly created...
+}
+
+func (s *localRegistrySuite) TestVersion() {
+	buf := &bytes.Buffer{}
+	err := common.RunBuildkit("version", []string{
+		"--builder", s.Name,
+	}, common.RunBuildStreams{Out: buf})
+	require.NoError(s.T(), err, "%s: builder version failed", s.Name)
+	lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
+	require.Len(s.T(), lines, 2)
+	require.Contains(s.T(), lines[0], "Client:")
+	require.Contains(s.T(), lines[1], "buildkitd")
 }
 
 func TestLocalRegistrySuite(t *testing.T) {

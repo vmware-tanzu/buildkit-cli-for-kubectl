@@ -64,7 +64,7 @@ func (s *configMapSuite) TestDefaultCreate() {
 		},
 		s.CreateFlags...,
 	)
-	err := common.RunBuildkit("create", args)
+	err := common.RunBuildkit("create", args, common.RunBuildStreams{})
 	require.NoError(s.T(), err, "%s: builder create failed", s.Name)
 	cfg, err := s.configMapClient.Get(context.Background(), s.Name, metav1.GetOptions{})
 	require.NoError(s.T(), err, "%s: fetch configmap failed", s.Name)
@@ -78,7 +78,7 @@ func (s *configMapSuite) TestDefaultCreate() {
 	logrus.Infof("%s: Removing builder", s.Name)
 	err = common.RunBuildkit("rm", []string{
 		s.Name,
-	})
+	}, common.RunBuildStreams{})
 	require.NoError(s.T(), err, "%s: builder rm failed", s.Name)
 	_, err = s.configMapClient.Get(context.Background(), s.Name, metav1.GetOptions{})
 	require.Error(s.T(), err, "config map wasn't cleaned up")
@@ -98,7 +98,7 @@ func (s *configMapSuite) TestPreExistingConfigDefaultCreate() {
 		},
 		s.CreateFlags...,
 	)
-	err = common.RunBuildkit("create", args)
+	err = common.RunBuildkit("create", args, common.RunBuildStreams{})
 	require.NoError(s.T(), err, "%s: builder create failed", s.Name)
 	cfg, err := s.configMapClient.Get(context.Background(), s.Name, metav1.GetOptions{})
 	require.NoError(s.T(), err, "%s: fetch configmap failed", s.Name)
@@ -112,7 +112,7 @@ func (s *configMapSuite) TestPreExistingConfigDefaultCreate() {
 	logrus.Infof("%s: Removing builder", s.Name)
 	err = common.RunBuildkit("rm", []string{
 		s.Name,
-	})
+	}, common.RunBuildStreams{})
 	require.NoError(s.T(), err, "%s: builder rm failed", s.Name)
 	_, err = s.configMapClient.Get(context.Background(), s.Name, metav1.GetOptions{})
 	// TODO if we preserve pre-existing configmaps this will need to be refined.
@@ -137,7 +137,7 @@ func (s *configMapSuite) TestCustomCreate() {
 		},
 		s.CreateFlags...,
 	)
-	err = common.RunBuildkit("create", args)
+	err = common.RunBuildkit("create", args, common.RunBuildStreams{})
 	require.NoError(s.T(), err, "%s: builder create failed", s.Name)
 	cfg, err := s.configMapClient.Get(context.Background(), s.Name, metav1.GetOptions{})
 	require.NoError(s.T(), err, "%s: fetch configmap failed", s.Name)
@@ -152,7 +152,7 @@ func (s *configMapSuite) TestCustomCreate() {
 	logrus.Infof("%s: Removing builder", s.Name)
 	err = common.RunBuildkit("rm", []string{
 		s.Name,
-	})
+	}, common.RunBuildStreams{})
 	require.NoError(s.T(), err, "%s: builder rm failed", s.Name)
 	_, err = s.configMapClient.Get(context.Background(), s.Name, metav1.GetOptions{})
 	require.Error(s.T(), err, "config map wasn't cleaned up")
@@ -179,7 +179,7 @@ func (s *configMapSuite) TestPreExistingWithCustomCreate() {
 		},
 		s.CreateFlags...,
 	)
-	err = common.RunBuildkit("create", args)
+	err = common.RunBuildkit("create", args, common.RunBuildStreams{})
 	require.NoError(s.T(), err, "%s: builder create failed", s.Name)
 	cfg, err := s.configMapClient.Get(context.Background(), s.Name, metav1.GetOptions{})
 	require.NoError(s.T(), err, "%s: fetch configmap failed", s.Name)
@@ -195,7 +195,7 @@ func (s *configMapSuite) TestPreExistingWithCustomCreate() {
 	logrus.Infof("%s: Removing builder", s.Name)
 	err = common.RunBuildkit("rm", []string{
 		s.Name,
-	})
+	}, common.RunBuildStreams{})
 	require.NoError(s.T(), err, "%s: builder rm failed", s.Name)
 	_, err = s.configMapClient.Get(context.Background(), s.Name, metav1.GetOptions{})
 	require.Error(s.T(), err, "config map wasn't cleaned up")

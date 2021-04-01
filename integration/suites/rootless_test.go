@@ -34,7 +34,7 @@ func (s *rootlessSuite) TestBuildWithoutPush() {
 		"--tag", imageName,
 		dir,
 	}
-	err = common.RunBuild(args)
+	err = common.RunBuild(args, common.RunBuildStreams{})
 	require.Error(s.T(), err)
 	require.Contains(s.T(), err.Error(), "please specify --push")
 }

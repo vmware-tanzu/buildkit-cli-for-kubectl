@@ -62,7 +62,7 @@ func (s *parallelDefaultSuite) TestParallelDefaultBuilds() {
 				"--tag", imageName,
 				dirs[i],
 			}
-			err := common.RunBuild(args)
+			err := common.RunBuild(args, common.RunBuildStreams{})
 			if err != nil {
 				errors[i] = err
 				return

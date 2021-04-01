@@ -36,7 +36,7 @@ func (s *BaseSuite) SetupSuite() {
 			},
 			s.CreateFlags...,
 		)
-		err := RunBuildkit("create", args)
+		err := RunBuildkit("create", args, RunBuildStreams{})
 		require.NoError(s.T(), err, "%s: builder create failed", s.Name)
 	}
 
@@ -49,7 +49,7 @@ func (s *BaseSuite) TearDownSuite() {
 	logrus.Infof("%s: Removing builder", s.Name)
 	err := RunBuildkit("rm", []string{
 		s.Name,
-	})
+	}, RunBuildStreams{})
 	require.NoError(s.T(), err, "%s: builder rm failed", s.Name)
 	configMapClient := s.ClientSet.CoreV1().ConfigMaps(s.Namespace)
 	_, err = configMapClient.Get(context.Background(), s.Name, metav1.GetOptions{})
@@ -76,7 +76,7 @@ func (s *BaseSuite) TestSimpleBuild() {
 		"--tag", imageName,
 		dir,
 	)
-	err = RunBuild(args)
+	err = RunBuild(args, RunBuildStreams{})
 	if isRootlessCreate(s.CreateFlags) {
 		require.Error(s.T(), err)
 		require.Contains(s.T(), err.Error(), "please specify")
@@ -116,7 +116,7 @@ func (s *BaseSuite) TestLocalOutputTarBuild() {
 		fmt.Sprintf("--output=type=tar,dest=%s", path.Join(dir, "out.tar")),
 		dir,
 	)
-	err = RunBuild(args)
+	err = RunBuild(args, RunBuildStreams{})
 	require.NoError(s.T(), err, "build failed")
 	// TODO - consider inspecting the out.tar for validity...
 }

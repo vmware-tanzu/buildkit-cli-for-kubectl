@@ -70,6 +70,7 @@ type Driver interface {
 	Features() map[Feature]bool
 	List(ctx context.Context) ([]Builder, error)
 	RuntimeSockProxy(ctx context.Context, name string) (net.Conn, error)
+	GetVersion(ctx context.Context) (string, error)
 
 	// TODO - do we really need both?  Seems like some cleanup needed here...
 	GetAuthWrapper(string) imagetools.Auth
