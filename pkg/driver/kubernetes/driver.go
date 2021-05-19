@@ -282,7 +282,17 @@ func (d *Driver) wait(ctx context.Context, sub progress.SubLogger) error {
 							return err
 						}
 						// Instead of updating, we'll just delete the deployment and re-create
-						if err := d.deploymentClient.Delete(ctx, d.deployment.Name, metav1.DeleteOptions{}); err != nil {
+						zero64 := int64(0)
+						if err := d.deploymentClient.Delete(ctx, d.deployment.Name, metav1.DeleteOptions{
+							// Ensure we only delete the deployment we recognize to avoid racing with other CLIs
+							Preconditions: &metav1.Preconditions{
+								UID:             &depl.UID,
+								ResourceVersion: &depl.ResourceVersion,
+							},
+							GracePeriodSeconds: &zero64,
+						}); err != nil {
+							// We may be racing with another CLI - Reset the userSpecifiedRuntime in case
+							d.userSpecifiedRuntime = false
 							return errors.Wrapf(err, "error while calling deploymentClient.Delete for %q", d.deployment.Name)
 						}
 
@@ -312,6 +322,8 @@ func (d *Driver) wait(ctx context.Context, sub progress.SubLogger) error {
 						depl, err = d.deploymentClient.Create(ctx, d.deployment, metav1.CreateOptions{})
 						if err != nil {
 							// If we fail to re-create, bail out entirely
+							// We may be racing with another CLI - Reset the userSpecifiedRuntime in case
+							d.userSpecifiedRuntime = false
 							return fmt.Errorf("failed to redeploy with updated settings: %w", err)
 						}
 						// Keep on waiting and hope this variation works.
