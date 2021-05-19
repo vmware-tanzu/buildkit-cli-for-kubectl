@@ -4,7 +4,6 @@ package commands
 
 import (
 	"fmt"
-	"os"
 	"strings"
 	"text/tabwriter"
 
@@ -35,7 +34,7 @@ func runLs(streams genericclioptions.IOStreams, in lsOptions) error {
 		builders = append(builders, b...)
 	}
 
-	w := tabwriter.NewWriter(os.Stdout, 0, 0, 1, ' ', 0)
+	w := tabwriter.NewWriter(streams.Out, 0, 0, 1, ' ', 0)
 	fmt.Fprintf(w, "NAME\tNODE\tDRIVER\tSTATUS\tPLATFORMS\n")
 
 	for _, b := range builders {

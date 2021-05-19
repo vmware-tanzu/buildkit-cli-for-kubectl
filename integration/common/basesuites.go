@@ -3,6 +3,7 @@
 package common
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"path"
@@ -119,4 +120,16 @@ func (s *BaseSuite) TestLocalOutputTarBuild() {
 	err = RunBuild(args, RunBuildStreams{})
 	require.NoError(s.T(), err, "build failed")
 	// TODO - consider inspecting the out.tar for validity...
+}
+
+func (s *BaseSuite) TestLs() {
+	buf := &bytes.Buffer{}
+	err := RunBuildkit("ls", []string{}, RunBuildStreams{Out: buf})
+	require.NoError(s.T(), err, "%s: ls failed", s.Name)
+	lines := buf.String()
+	require.Contains(s.T(), lines, s.Name)
+
+	err = RunBuildkit("ls", []string{"dummy"}, RunBuildStreams{})
+	require.Error(s.T(), err)
+	require.Contains(s.T(), err.Error(), "requires exactly")
 }
