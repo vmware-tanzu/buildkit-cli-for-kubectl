@@ -9,10 +9,12 @@ import (
 	"testing"
 
 	"github.com/sirupsen/logrus"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
 	"github.com/vmware-tanzu/buildkit-cli-for-kubectl/integration/common"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	v1 "k8s.io/client-go/kubernetes/typed/core/v1"
 )
@@ -35,6 +37,19 @@ func (s *parallelDefaultSuite) SetupSuite() {
 	s.ClientSet, s.Namespace, err = common.GetKubeClientset()
 	require.NoError(s.T(), err, "%s: kube client failed", s.Name)
 	s.configMapClient = s.ClientSet.CoreV1().ConfigMaps(s.Namespace)
+}
+
+func (s *parallelDefaultSuite) TearDownSuite() {
+	common.LogBuilderLogs(context.Background(), s.Name, s.Namespace, s.ClientSet)
+	logrus.Infof("%s: Removing builder", s.Name)
+	err := common.RunBuildkit("rm", []string{
+		s.Name,
+	})
+	require.NoError(s.T(), err, "%s: builder rm failed", s.Name)
+	configMapClient := s.ClientSet.CoreV1().ConfigMaps(s.Namespace)
+	_, err = configMapClient.Get(context.Background(), s.Name, metav1.GetOptions{})
+	require.Error(s.T(), err, "config map wasn't cleaned up")
+	require.Contains(s.T(), err.Error(), "not found")
 }
 
 func (s *parallelDefaultSuite) TestParallelDefaultBuilds() {
@@ -79,7 +94,7 @@ func (s *parallelDefaultSuite) TestParallelDefaultBuilds() {
 	}
 	wg.Wait()
 	for i := 0; i < ParallelDefaultBuildCount; i++ {
-		require.NoError(s.T(), errors[i], "build/run %d failed", i)
+		assert.NoError(s.T(), errors[i], "build/run %d failed", i)
 	}
 }
 

@@ -37,6 +37,7 @@ func RunSimpleBuildImageAsPod(ctx context.Context, name, imageName, namespace st
 	podClient := clientset.CoreV1().Pods(namespace)
 	eventClient := clientset.CoreV1().Events(namespace)
 	logrus.Infof("starting pod %s for image: %s", name, imageName)
+	gracePeriod := int64(0) // Speed up the shutdown at the end
 	// Start the pod
 	pod, err := podClient.Create(ctx,
 		&v1.Pod{
@@ -53,6 +54,7 @@ func RunSimpleBuildImageAsPod(ctx context.Context, name, imageName, namespace st
 						ImagePullPolicy: v1.PullNever,
 					},
 				},
+				TerminationGracePeriodSeconds: &gracePeriod,
 			},
 		},
 		metav1.CreateOptions{},
@@ -141,6 +143,78 @@ func GetRuntime(ctx context.Context, clientset *kubernetes.Clientset) (string, e
 	}
 	return "", fmt.Errorf("unable to retrieve node runtimes")
 
+}
+
+// GetNodeCount will return the number of nodes detected in the cluster that are ready
+func GetNodeCount(ctx context.Context, clientset *kubernetes.Clientset) int32 {
+	nodeClient := clientset.CoreV1().Nodes()
+	nodes, err := nodeClient.List(ctx, metav1.ListOptions{})
+	ready := int32(0)
+	if err != nil {
+		logrus.Errorf("failed to list nodes: %s", err)
+		return 0
+	}
+	for _, node := range nodes.Items {
+		nodeReady := false
+		for _, condition := range node.Status.Conditions {
+			if condition.Type == v1.NodeReady && condition.Status == v1.ConditionTrue {
+				nodeReady = true
+				break
+			}
+		}
+		if nodeReady {
+			ready++
+		} else {
+			logrus.Warningf("node %s not ready", node.Name)
+		}
+	}
+	return ready
+}
+
+// MaybeScaleUp will scale up the designated builder if the cluster has multiple ready nodes
+func MaybeScaleUpBuilder(ctx context.Context, clientset *kubernetes.Clientset, namespace, builderName string) error {
+	if count := GetNodeCount(ctx, clientset); count > 1 {
+		logrus.Infof("scaling up %s to %d", builderName, count)
+		deploymentClient := clientset.AppsV1().Deployments(namespace)
+		scale, err := deploymentClient.GetScale(ctx, builderName, metav1.GetOptions{})
+		if err != nil {
+			return err
+		}
+		scale.Spec.Replicas = count
+		_, err = deploymentClient.UpdateScale(
+			ctx,
+			builderName,
+			scale,
+			metav1.UpdateOptions{})
+		if err != nil {
+			return err
+		}
+
+		// Wait for things to scale up...
+		logrus.Infof("waiting for the builder %s to scale up to %d", builderName, count)
+		ready := false
+		for try := 0; try < 100; try++ {
+			time.Sleep(250 * time.Millisecond)
+			depl, err := deploymentClient.Get(ctx, builderName, metav1.GetOptions{})
+			if err != nil {
+				logrus.Errorf("Failed to get builder deployment after scaling up")
+				return err
+			}
+			if depl.Status.ReadyReplicas >= count {
+				logrus.Infof("builder %s has scaled up to %d", builderName, depl.Status.ReadyReplicas)
+				ready = true
+				break
+			} else if try > 50 { // Keep it quiet for normal circumstances
+				logrus.Infof("builder hasn't scaled up yet: %d of %d", depl.Status.ReadyReplicas, count)
+				// TODO - if this becomes a failure mode of our tests consider adding more detailed
+				//        reporting of why it hasn't hit scale yet...
+			}
+		}
+		if !ready {
+			return fmt.Errorf("builder failed to scale up")
+		}
+	}
+	return nil
 }
 
 // LogBuilderLogs attempts to replay the log messages from the builder(s)

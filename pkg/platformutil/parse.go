@@ -34,6 +34,10 @@ func Parse(platformsStr []string) ([]specs.Platform, error) {
 func parse(in string) (specs.Platform, error) {
 	if strings.EqualFold(in, "local") {
 		return platforms.DefaultSpec(), nil
+	} else if strings.EqualFold(in, "auto") {
+		return specs.Platform{
+			Architecture: "auto",
+		}, nil
 	}
 	return platforms.Parse(in)
 }

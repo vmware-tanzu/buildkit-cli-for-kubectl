@@ -30,6 +30,7 @@ GO_DEPS=$(foreach dir,$(shell go list -deps -f '{{.Dir}}' ./cmd/kubectl-buildkit
 REVISION=$(shell git describe --match 'v[0-9]*' --always --dirty --tags)
 GO_FLAGS=-ldflags "-X $(GO_MOD_NAME)/version.Version=${VERSION}" -mod=vendor
 GO_COVER_FLAGS=-cover -coverpkg=./... -covermode=count
+CURRENT_RUNTIME=$(shell kubectl get nodes -o yaml | grep containerRuntimeVersion | grep -v "f:container" | head -1 | cut -f2 -d: | xargs)
 
 .PHONY: help
 help:
@@ -75,17 +76,19 @@ integration:
 	TEST_KUBECONFIG=$(TEST_KUBECONFIG) go test -timeout $(TEST_TIMEOUT) $(GO_FLAGS) \
 		-parallel $(TEST_PARALLELISM) \
 		$(EXTRA_GO_TEST_FLAGS)  \
-		$(GO_COVER_FLAGS) -coverprofile=./cover-int.out \
+		$(GO_COVER_FLAGS) -coverprofile=./cover-int-$(CURRENT_RUNTIME).out \
 		./integration/...
 
-	go tool cover -html=./cover-int.out -o ./cover-int.html
+	go tool cover -html=./cover-int-$(CURRENT_RUNTIME).out -o ./cover-int.html
 
 .PHONY: coverage
 coverage: cover.html
 
-cover.html: cover-int.out cover-unit.out
-	cp cover-int.out cover.out
-	tail +2 cover-unit.out >> cover.out
+cover.html: cover-int-*.out cover-unit.out
+	cp cover-unit.out cover.out
+	for file in cover-int-*.out; do \
+		tail +2 $${file} >> cover.out ; \
+	done
 	go tool cover -html=./cover.out -o ./cover.html
 	go tool cover -func cover.out | grep total:
 	open ./cover.html

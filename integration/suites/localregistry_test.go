@@ -63,6 +63,9 @@ func (s *localRegistrySuite) SetupSuite() {
 	username := "jdoe"
 	password := "supersecret"
 
+	// Attempt to clean up any cruft that might have leaked from a prior failed run
+	s.cleanup(ctx, false)
+
 	// Generate TLS certificates
 	logrus.Infof("%s: Generating self-signed cert for the registry", s.Name)
 	crt, key, err := cert.GenerateSelfSignedCertKey("registry", nil, []string{s.registryFQDN})
@@ -240,32 +243,35 @@ func (s *localRegistrySuite) SetupSuite() {
 	require.NoError(s.T(), err, "%s: builder creation failed", s.Name)
 }
 
+func (s *localRegistrySuite) cleanup(ctx context.Context, reportFailures bool) {
+	// Clean everything up...
+	err := s.podClient.Delete(ctx, s.registryName, metav1.DeleteOptions{})
+	if err != nil && reportFailures {
+		logrus.Warnf("failed to clean up pod %s: %s", s.registryName, err)
+	}
+	err = s.serviceClient.Delete(ctx, s.registryName, metav1.DeleteOptions{})
+	if err != nil && reportFailures {
+		logrus.Warnf("failed to clean up service %s: %s", s.registryName, err)
+	}
+	err = s.configMapClient.Delete(ctx, s.configMapName, metav1.DeleteOptions{})
+	if err != nil && reportFailures {
+		logrus.Warnf("failed to clean up configMap %s: %s", s.configMapName, err)
+	}
+	err = s.secretClient.Delete(ctx, s.Name, metav1.DeleteOptions{})
+	if err != nil && reportFailures {
+		logrus.Warnf("failed to clean up registry secret %s: %s", s.configMapName, err)
+	}
+}
+
 func (s *localRegistrySuite) TearDownSuite() {
 	if !s.skipTeardown {
 
 		ctx := context.Background()
-
-		// Clean everything up...
-		err := s.podClient.Delete(ctx, s.registryName, metav1.DeleteOptions{})
-		if err != nil {
-			logrus.Warnf("failed to clean up pod %s: %s", s.registryName, err)
-		}
-		err = s.serviceClient.Delete(ctx, s.registryName, metav1.DeleteOptions{})
-		if err != nil {
-			logrus.Warnf("failed to clean up service %s: %s", s.registryName, err)
-		}
-		err = s.configMapClient.Delete(ctx, s.configMapName, metav1.DeleteOptions{})
-		if err != nil {
-			logrus.Warnf("failed to clean up configMap %s: %s", s.configMapName, err)
-		}
-		err = s.secretClient.Delete(ctx, s.Name, metav1.DeleteOptions{})
-		if err != nil {
-			logrus.Warnf("failed to clean up registry secret %s: %s", s.configMapName, err)
-		}
+		s.cleanup(ctx, true)
 
 		common.LogBuilderLogs(context.Background(), s.Name, s.Namespace, s.ClientSet)
 		logrus.Infof("%s: Removing builder", s.Name)
-		err = common.RunBuildkit("rm", []string{
+		err := common.RunBuildkit("rm", []string{
 			s.Name,
 		})
 		if err != nil {
@@ -399,7 +405,8 @@ func main() {
 		"--builder", s.Name,
 		"--push",
 		"--tag", imageName,
-		"--platform", "linux/386,linux/amd64,linux/arm/v6,linux/arm/v7,linux/arm64,windows/amd64",
+		//"--platform", "linux/386,linux/amd64,linux/arm/v6,linux/arm/v7,linux/arm64,windows/amd64",
+		"--platform", "linux/amd64,linux/arm/v7,linux/arm64", // Shorter list...
 		dir,
 	}
 	err = common.RunBuild(args)

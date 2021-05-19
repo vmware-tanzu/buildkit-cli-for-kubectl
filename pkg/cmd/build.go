@@ -226,23 +226,17 @@ func runBuild(streams genericclioptions.IOStreams, in buildOptions) error {
 		contextPathHash = in.contextPath
 	}
 
-	return buildTargets(ctx, in.KubeClientConfig, streams, map[string]build.Options{"default": opts}, in.progress, contextPathHash, in.registrySecretName, in.builder)
+	return buildTargets(ctx, in.KubeClientConfig, streams, opts, in.progress, contextPathHash, in.registrySecretName, in.builder)
 }
 
-func buildTargets(ctx context.Context, kubeClientConfig clientcmd.ClientConfig, streams genericclioptions.IOStreams, opts map[string]build.Options, progressMode, contextPathHash, registrySecretName, instance string) error {
+func buildTargets(ctx context.Context, kubeClientConfig clientcmd.ClientConfig, streams genericclioptions.IOStreams, opts build.Options, progressMode, contextPathHash, registrySecretName, instance string) error {
 	driverName := instance
 	if driverName == "" {
 		driverName = "buildkit"
 	}
-	d, err := driver.GetDriver(ctx, driverName, nil, kubeClientConfig, []string{} /* TODO what BuildkitFlags are these? */, "" /* unused config file */, map[string]string{} /* DriverOpts unused */, contextPathHash)
+	drv, err := driver.GetDriver(ctx, driverName, nil, kubeClientConfig, []string{} /* TODO what BuildkitFlags are these? */, "" /* unused config file */, map[string]string{} /* DriverOpts unused */, contextPathHash)
 	if err != nil {
 		return err
-	}
-	dis := []build.DriverInfo{
-		{
-			Name:   driverName,
-			Driver: d,
-		},
 	}
 
 	ctx2, cancel := context.WithCancel(context.TODO())
@@ -250,7 +244,7 @@ func buildTargets(ctx context.Context, kubeClientConfig clientcmd.ClientConfig, 
 
 	pw := progress.NewPrinter(ctx2, os.Stderr, progressMode)
 
-	_, err = build.Build(ctx, dis, opts, kubeClientConfig, registrySecretName, pw)
+	_, err = build.Build(ctx, drv, opts, kubeClientConfig, registrySecretName, pw)
 	return err
 }
 

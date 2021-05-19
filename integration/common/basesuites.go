@@ -28,6 +28,10 @@ type BaseSuite struct {
 
 func (s *BaseSuite) SetupSuite() {
 	var err error
+	s.ClientSet, s.Namespace, err = GetKubeClientset()
+	require.NoError(s.T(), err, "%s: kube client failed", s.Name)
+	ctx := context.Background()
+
 	if !s.SkipSetupCreate {
 		logrus.Infof("%s: Setting up builder", s.Name)
 		args := append(
@@ -36,12 +40,15 @@ func (s *BaseSuite) SetupSuite() {
 			},
 			s.CreateFlags...,
 		)
-		err := RunBuildkit("create", args)
+		count := GetNodeCount(ctx, s.ClientSet)
+		if !isRootlessCreate(s.CreateFlags) && count > 1 {
+			args = append(args,
+				fmt.Sprintf("--replicas=%d", count),
+			)
+		}
+		err = RunBuildkit("create", args)
 		require.NoError(s.T(), err, "%s: builder create failed", s.Name)
 	}
-
-	s.ClientSet, s.Namespace, err = GetKubeClientset()
-	require.NoError(s.T(), err, "%s: kube client failed", s.Name)
 }
 
 func (s *BaseSuite) TearDownSuite() {

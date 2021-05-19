@@ -42,8 +42,17 @@ type authProvider struct {
 	// softFailure bool
 }
 
+// TODO unwind this abstraction...
 func (ap *authProvider) GetAuthConfig(registryHostname string) (imagetools.AuthConfig, error) {
-	return imagetools.AuthConfig{}, fmt.Errorf("GetAuthConfig not yet implemented for kube secrets")
+	res := imagetools.AuthConfig{}
+	credResponse, err := ap.Credentials(context.Background(), &auth.CredentialsRequest{Host: registryHostname})
+	if err != nil {
+		return res, err
+	}
+	res.Username = credResponse.Username
+	res.Password = credResponse.Secret
+
+	return res, nil
 }
 
 func (ap *authProvider) Register(server *grpc.Server) {
@@ -100,6 +109,8 @@ func (ap *authProvider) Credentials(ctx context.Context, req *auth.CredentialsRe
 			}
 		}
 	} else { // TODO remove this extra debugging once things are sorted out...
+		// Can we breadcrumb the potential failure here so that if we see the build fail we can give
+		// a more helpful error message to the user?
 		logrus.Infof("no credentials found for registry %s (proceeding with anonymous auth)", req.Host)
 	}
 

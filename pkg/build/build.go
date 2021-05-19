@@ -73,196 +73,6 @@ type Inputs struct {
 	InStream       io.Reader
 }
 
-type DriverInfo struct {
-	Driver   driver.Driver
-	Name     string
-	Platform []specs.Platform
-	Err      error
-}
-
-func filterAvailableDrivers(drivers []DriverInfo) ([]DriverInfo, error) {
-	out := make([]DriverInfo, 0, len(drivers))
-	err := errors.Errorf("no drivers found")
-	for _, di := range drivers {
-		if di.Err == nil && di.Driver != nil {
-			out = append(out, di)
-		}
-		if di.Err != nil {
-			err = di.Err
-		}
-	}
-	if len(out) > 0 {
-		return out, nil
-	}
-	return nil, err
-}
-
-type driverPair struct {
-	driverIndex int
-	platforms   []specs.Platform
-	so          *client.SolveOpt
-}
-
-func driverIndexes(m map[string][]driverPair) []int {
-	out := make([]int, 0, len(m))
-	visited := map[int]struct{}{}
-	for _, dp := range m {
-		for _, d := range dp {
-			if _, ok := visited[d.driverIndex]; ok {
-				continue
-			}
-			visited[d.driverIndex] = struct{}{}
-			out = append(out, d.driverIndex)
-		}
-	}
-	return out
-}
-
-func allIndexes(l int) []int {
-	out := make([]int, 0, l)
-	for i := 0; i < l; i++ {
-		out = append(out, i)
-	}
-	return out
-}
-
-func ensureBooted(ctx context.Context, drivers []DriverInfo, idxs []int, pw progress.Writer) (map[string]map[string]*client.Client, error) {
-	clients := map[string]map[string]*client.Client{} // [driverName][chosenNodeName]
-	eg, ctx := errgroup.WithContext(ctx)
-
-	for _, i := range idxs {
-		clients[drivers[i].Name] = map[string]*client.Client{}
-		func(i int) {
-			eg.Go(func() error {
-				c, chosenNodeName, err := driver.Boot(ctx, drivers[i].Driver, pw)
-				if err != nil {
-					return err
-				}
-				clients[drivers[i].Name][chosenNodeName] = c
-				return nil
-			})
-		}(i)
-	}
-
-	if err := eg.Wait(); err != nil {
-		return nil, err
-	}
-
-	return clients, nil
-}
-
-func splitToDriverPairs(availablePlatforms map[string]int, opt map[string]Options) map[string][]driverPair {
-	m := map[string][]driverPair{}
-	for k, opt := range opt {
-		mm := map[int][]specs.Platform{}
-		for _, p := range opt.Platforms {
-			k := platforms.Format(p)
-			idx := availablePlatforms[k] // default 0
-			pp := mm[idx]
-			pp = append(pp, p)
-			mm[idx] = pp
-		}
-		dps := make([]driverPair, 0, 2)
-		for idx, pp := range mm {
-			dps = append(dps, driverPair{driverIndex: idx, platforms: pp})
-		}
-		m[k] = dps
-	}
-	return m
-}
-
-func resolveDrivers(ctx context.Context, drivers []DriverInfo, opt map[string]Options, pw progress.Writer) (map[string][]driverPair, map[string]map[string]*client.Client, error) {
-	availablePlatforms := map[string]int{}
-	for i, d := range drivers {
-		for _, p := range d.Platform {
-			availablePlatforms[platforms.Format(p)] = i
-		}
-	}
-
-	undetectedPlatform := false
-	allPlatforms := map[string]int{}
-	for _, opt := range opt {
-		for _, p := range opt.Platforms {
-			k := platforms.Format(p)
-			allPlatforms[k] = -1
-			if _, ok := availablePlatforms[k]; !ok {
-				undetectedPlatform = true
-			}
-		}
-	}
-
-	// fast path
-	if len(drivers) == 1 || len(allPlatforms) == 0 {
-		m := map[string][]driverPair{}
-		for k, opt := range opt {
-			m[k] = []driverPair{{driverIndex: 0, platforms: opt.Platforms}}
-		}
-		clients, err := ensureBooted(ctx, drivers, driverIndexes(m), pw)
-		if err != nil {
-			return nil, nil, err
-		}
-		return m, clients, nil
-	}
-
-	// map based on existing platforms
-	if !undetectedPlatform {
-		m := splitToDriverPairs(availablePlatforms, opt)
-		clients, err := ensureBooted(ctx, drivers, driverIndexes(m), pw)
-		if err != nil {
-			return nil, nil, err
-		}
-		return m, clients, nil
-	}
-
-	// boot all drivers in k
-	clients, err := ensureBooted(ctx, drivers, allIndexes(len(drivers)), pw)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	eg, ctx := errgroup.WithContext(ctx)
-	workers := make([][]*client.WorkerInfo, len(clients))
-
-	i := 0
-	for driverName := range clients {
-		for nodeName, c := range clients[driverName] {
-			if c == nil {
-				continue
-			}
-			func(nodeName string, i int) {
-				eg.Go(func() error {
-					ww, err := clients[driverName][nodeName].ListWorkers(ctx)
-					if err != nil {
-						return errors.Wrap(err, "listing workers")
-					}
-					workers[i] = ww
-					return nil
-				})
-			}(nodeName, i)
-			i++
-		}
-	}
-
-	if err := eg.Wait(); err != nil {
-		return nil, nil, err
-	}
-
-	for i, ww := range workers {
-		for _, w := range ww {
-			for _, p := range w.Platforms {
-				p = platforms.Normalize(p)
-				ps := platforms.Format(p)
-
-				if _, ok := availablePlatforms[ps]; !ok {
-					availablePlatforms[ps] = i
-				}
-			}
-		}
-	}
-
-	return splitToDriverPairs(availablePlatforms, opt), clients, nil
-}
-
 func toRepoOnly(in string) (string, error) {
 	m := map[string]struct{}{}
 	p := strings.Split(in, ",")
@@ -280,9 +90,9 @@ func toRepoOnly(in string) (string, error) {
 	return strings.Join(out, ","), nil
 }
 
-// TODO - this could use some optimization...
-func toSolveOpt(ctx context.Context, d driver.Driver, multiDriver bool, opt Options, dl dockerLoadCallback) (solveOpt *client.SolveOpt, release func(), err error) {
+func toSolveOpt(ctx context.Context, d driver.Driver, multiNodeRequested bool, opt Options, dl dockerLoadCallback) (*client.SolveOpt, func(), error) {
 	defers := make([]func(), 0, 2)
+	var err error
 	releaseF := func() {
 		for _, f := range defers {
 			f()
@@ -296,7 +106,7 @@ func toSolveOpt(ctx context.Context, d driver.Driver, multiDriver bool, opt Opti
 	}()
 
 	if opt.ImageIDFile != "" {
-		if multiDriver || len(opt.Platforms) != 0 {
+		if multiNodeRequested || len(opt.Platforms) != 0 { // TODO the secondary test here will become redundant once multiPlatformRequested is complete
 			return nil, nil, errors.Errorf("image ID file cannot be specified when building for multiple platforms")
 		}
 		// Avoid leaving a stale file if we eventually fail
@@ -305,23 +115,13 @@ func toSolveOpt(ctx context.Context, d driver.Driver, multiDriver bool, opt Opti
 		}
 	}
 
-	// inline cache from build arg
-	if v, ok := opt.BuildArgs["BUILDKIT_INLINE_CACHE"]; ok {
-		if v, _ := strconv.ParseBool(v); v {
-			opt.CacheTo = append(opt.CacheTo, client.CacheOptionsEntry{
-				Type:  "inline",
-				Attrs: map[string]string{},
-			})
-		}
-	}
-
 	for _, e := range opt.CacheTo {
 		if e.Type != "inline" && !d.Features()[driver.CacheExport] {
-			return nil, nil, notSupported(d, driver.CacheExport)
+			return nil, nil, notSupported(driver.CacheExport)
 		}
 	}
 
-	so := client.SolveOpt{
+	solveOpt := client.SolveOpt{
 		Frontend:            "dockerfile.v0",
 		FrontendAttrs:       map[string]string{},
 		LocalDirs:           map[string]string{},
@@ -331,20 +131,20 @@ func toSolveOpt(ctx context.Context, d driver.Driver, multiDriver bool, opt Opti
 	}
 
 	if opt.FrontendImage != "" {
-		so.Frontend = "gateway.v0"
-		so.FrontendAttrs["source"] = opt.FrontendImage
+		solveOpt.Frontend = "gateway.v0"
+		solveOpt.FrontendAttrs["source"] = opt.FrontendImage
 	}
 
-	if multiDriver {
+	if multiNodeRequested {
 		// force creation of manifest list
-		so.FrontendAttrs["multi-platform"] = "true"
+		solveOpt.FrontendAttrs["multi-platform"] = "true"
 	}
 
 	switch len(opt.Exports) {
 	case 1:
 		// valid
 	case 0:
-		// Shouln't happen - higher level constructs should create 1+ exports
+		// Shouldn't happen - higher level constructs should create 1+ exports
 		return nil, nil, errors.Errorf("zero outputs currently unsupported")
 		// TODO - alternative would be
 		// opt.Exports = []client.ExportEntry{{Type: "image", Attrs: map[string]string{}}}
@@ -408,11 +208,11 @@ func toSolveOpt(ctx context.Context, d driver.Driver, multiDriver bool, opt Opti
 
 		// TODO - do more research on what this really means and if it's wired up correctly
 		if e.Type == "oci" && !driverFeatures[driver.OCIExporter] {
-			return nil, nil, notSupported(d, driver.OCIExporter)
+			return nil, nil, notSupported(driver.OCIExporter)
 		}
 		if e.Type == "docker" {
 			if !driverFeatures[driver.DockerExporter] {
-				return nil, nil, notSupported(d, driver.DockerExporter)
+				return nil, nil, notSupported(driver.DockerExporter)
 			}
 			// If the runtime is docker and we're not in
 			// rootless mode, then we will have mounted
@@ -438,14 +238,14 @@ func toSolveOpt(ctx context.Context, d driver.Driver, multiDriver bool, opt Opti
 		if e.Type == "containerd" { // TODO - should this just be dropped in favor of "image"?
 
 			// TODO should this just be wired up as "image" instead?
-			return nil, nil, notSupported(d, driver.ContainerdExporter)
+			return nil, nil, notSupported(driver.ContainerdExporter)
 			// TODO implement this scenario
 		}
 		if e.Type == "image" && !pushing {
 			if !driverFeatures[driver.ContainerdExporter] {
 				// TODO - this could use a little refinement - if the user specifies `--output=image` it would be nice
 				// to auto-wire this to handle both runtimes (docker and containerd)
-				return nil, nil, notSupported(d, driver.ContainerdExporter)
+				return nil, nil, notSupported(driver.ContainerdExporter)
 			}
 			// TODO - is there a better layer to optimize this part of the flow at?
 			multiNode := false
@@ -491,48 +291,49 @@ func toSolveOpt(ctx context.Context, d driver.Driver, multiDriver bool, opt Opti
 		// TODO If we're multi-node and "image" is specified, should we replicate it on all nodes?
 	}
 
-	so.Exports = opt.Exports
-	so.Session = opt.Session
+	solveOpt.Exports = opt.Exports
+	solveOpt.Session = opt.Session
 
-	releaseLoad, err := LoadInputs(opt.Inputs, &so)
+	releaseLoad, err := LoadInputs(opt.Inputs, &solveOpt)
 	if err != nil {
 		return nil, nil, err
 	}
 	defers = append(defers, releaseLoad)
 
 	if opt.Pull {
-		so.FrontendAttrs["image-resolve-mode"] = "pull"
+		solveOpt.FrontendAttrs["image-resolve-mode"] = "pull"
 	}
 	if opt.Target != "" {
-		so.FrontendAttrs["target"] = opt.Target
+		solveOpt.FrontendAttrs["target"] = opt.Target
 	}
 	if opt.NoCache {
-		so.FrontendAttrs["no-cache"] = ""
+		solveOpt.FrontendAttrs["no-cache"] = ""
 	}
 	for k, v := range opt.BuildArgs {
-		so.FrontendAttrs["build-arg:"+k] = v
+		solveOpt.FrontendAttrs["build-arg:"+k] = v
 	}
 	for k, v := range opt.Labels {
-		so.FrontendAttrs["label:"+k] = v
+		solveOpt.FrontendAttrs["label:"+k] = v
 	}
 
 	// set platforms
+	// TODO - likely needs some refactoring with native multi-arch support...
 	if len(opt.Platforms) != 0 {
 		pp := make([]string, len(opt.Platforms))
 		for i, p := range opt.Platforms {
 			pp[i] = platforms.Format(p)
 		}
 		if len(pp) > 1 && !d.Features()[driver.MultiPlatform] {
-			return nil, nil, notSupported(d, driver.MultiPlatform)
+			return nil, nil, notSupported(driver.MultiPlatform)
 		}
-		so.FrontendAttrs["platform"] = strings.Join(pp, ",")
+		solveOpt.FrontendAttrs["platform"] = strings.Join(pp, ",")
 	}
 
 	// setup networkmode
 	switch opt.NetworkMode {
 	case "host", "none":
-		so.FrontendAttrs["force-network-mode"] = opt.NetworkMode
-		so.AllowedEntitlements = append(so.AllowedEntitlements, entitlements.EntitlementNetworkHost)
+		solveOpt.FrontendAttrs["force-network-mode"] = opt.NetworkMode
+		solveOpt.AllowedEntitlements = append(solveOpt.AllowedEntitlements, entitlements.EntitlementNetworkHost)
 	case "", "default":
 	default:
 		return nil, nil, errors.Errorf("network mode %q not supported by buildkit", opt.NetworkMode)
@@ -543,27 +344,63 @@ func toSolveOpt(ctx context.Context, d driver.Driver, multiDriver bool, opt Opti
 	if err != nil {
 		return nil, nil, err
 	}
-	so.FrontendAttrs["add-hosts"] = extraHosts
-
-	return &so, releaseF, nil
+	solveOpt.FrontendAttrs["add-hosts"] = extraHosts
+	return &solveOpt, releaseF, nil
 }
 
-func Build(ctx context.Context, drivers []DriverInfo, opt map[string]Options, kubeClientConfig clientcmd.ClientConfig, registrySecretName string, pw progress.Writer) (resp map[string]*client.SolveResponse, err error) {
-	if len(drivers) == 0 {
-		return nil, errors.Errorf("driver required for build")
-	}
-
-	drivers, err = filterAvailableDrivers(drivers)
-	if err != nil {
-		return nil, errors.Wrapf(err, "no valid drivers found")
-	}
-	m, clients, err := resolveDrivers(ctx, drivers, opt, pw)
+func Build(ctx context.Context, drv driver.Driver, opt Options, kubeClientConfig clientcmd.ClientConfig, registrySecretName string, pw progress.Writer) (resp *client.SolveResponse, err error) {
+	drvClient, _, err := driver.Boot(ctx, drv, pw)
 	if err != nil {
 		close(pw.Status())
 		<-pw.Done()
 		return nil, err
 	}
 
+	drvInfo, err := drv.Info(ctx)
+	if err != nil {
+		close(pw.Status())
+		<-pw.Done()
+		return nil, err
+	}
+	_, mixed := drvInfo.GetPlatforms()
+
+	// Check for "auto" special case
+	// TODO - while this would be cool, in reality it doesn't work in practice
+	//        as most library images on hub don't have 386 binaries, so builds fail on x86
+	//        and they lack armv6, so ARM builds fail.
+	//        It might be possible to attempt and fall-back on well known errors for missing layers
+	//        or build a filter of some sorts for uncommon old architectures
+	//        or maybe there's a way to only build the latest platform
+	/*
+		for _, platform := range opt.Platforms {
+			if strings.EqualFold(platform.Architecture, "auto") {
+				opt.Platforms = drvPlatforms
+				break
+			}
+		}
+	*/
+
+	// Determine if we want to build a manifestlist based image, or a simple/plain image
+	// There are a few scenarios that can lead to this.
+	// * If the user specifies multiple explicit platforms
+	// * If the user specifies "auto" as the platform, and the driver nodes support multiples
+	multiPlatformRequested := len(opt.Platforms) > 1
+
+	// Determine if we want to split the build into multiple builder requests, or send to a single builder
+	multiNodeRequested := multiPlatformRequested && mixed // TODO - consider refining this algorithm...
+
+	// Determine the number of Solve calls we will perform
+	solveCount := 1
+	if multiNodeRequested {
+		solveCount = len(opt.Platforms)
+	}
+
+	requestedPlatforms := make([]specs.Platform, len(opt.Platforms))
+	for i, platform := range opt.Platforms {
+		requestedPlatforms[i] = platform
+	}
+
+	// TODO - come back to this and make sure it's legit...
 	defers := make([]func(), 0, 2)
 	defer func() {
 		if err != nil {
@@ -574,208 +411,203 @@ func Build(ctx context.Context, drivers []DriverInfo, opt map[string]Options, ku
 	}()
 
 	var auth imagetools.Auth
+	driverName := drv.GetName()
 
-	mw := progress.NewMultiWriter(pw)
-	eg, ctx := errgroup.WithContext(ctx)
-	for k, opt := range opt {
-		multiDriver := len(m[k]) > 1
-		for i, dp := range m[k] {
-			d := drivers[dp.driverIndex].Driver
-			driverName := drivers[dp.driverIndex].Name
-			opt.Platforms = dp.platforms
+	multiWriter := progress.NewMultiWriter(pw)
+	errGroup, ctx := errgroup.WithContext(ctx)
 
-			// TODO - this is also messy and wont work for multi-driver scenarios (no that it's possible yet...)
-			if auth == nil {
-				auth = d.GetAuthWrapper(registrySecretName)
-				opt.Session = append(opt.Session, d.GetAuthProvider(registrySecretName, os.Stderr))
-			}
-			so, release, err := toSolveOpt(ctx, d, multiDriver, opt, func(arg string) (io.WriteCloser, func(), error) {
-				// Set up loader based on first found type (only 1 supported)
-				for _, entry := range opt.Exports {
-					if entry.Type == "docker" {
-						return newDockerLoader(ctx, d, kubeClientConfig, driverName, mw)
-					} else if entry.Type == "oci" {
-						return newContainerdLoader(ctx, d, kubeClientConfig, driverName, mw)
-					}
-				}
-				// TODO - Push scenario?  (or is this a "not reached" scenario now?)
-				return nil, nil, fmt.Errorf("raw push scenario not yet supported")
-			})
-			if err != nil {
-				return nil, err
-			}
-			defers = append(defers, release)
-			m[k][i].so = so
-		}
+	solveOpts := make([]*client.SolveOpt, solveCount)
+	res := make([]*client.SolveResponse, solveCount)
+
+	if auth == nil {
+		auth = drv.GetAuthWrapper(registrySecretName)
+		opt.Session = append(opt.Session, drv.GetAuthProvider(registrySecretName, os.Stderr))
 	}
 
-	resp = map[string]*client.SolveResponse{}
-	var respMu sync.Mutex
-
-	multiTarget := len(opt) > 1
-
-	for k, opt := range opt {
-		err := func(k string) error {
-			opt := opt
-			dps := m[k]
-			multiDriver := len(m[k]) > 1
-
-			res := make([]*client.SolveResponse, len(dps))
-			wg := &sync.WaitGroup{}
-			wg.Add(len(dps))
-
-			var pushNames string
-
-			eg.Go(func() error {
-				pw := mw.WithPrefix("default", false)
-				defer close(pw.Status())
-				wg.Wait()
-				select {
-				case <-ctx.Done():
-					return ctx.Err()
-				default:
+	for i := 0; i < len(solveOpts); i++ {
+		// If we're multi-node, swap out the platform list for one platform at a time
+		if multiNodeRequested {
+			opt.Platforms = []specs.Platform{requestedPlatforms[i]}
+		}
+		solveOpt, release, err := toSolveOpt(ctx, drv, multiNodeRequested, opt, func(arg string) (io.WriteCloser, func(), error) {
+			// Set up loader based on first found type (only 1 supported)
+			for _, entry := range opt.Exports {
+				if entry.Type == "docker" {
+					return newDockerLoader(ctx, drv, kubeClientConfig, driverName, multiWriter)
+				} else if entry.Type == "oci" {
+					return newContainerdLoader(ctx, drv, kubeClientConfig, driverName, multiWriter)
 				}
-
-				respMu.Lock()
-				resp[k] = res[0]
-				respMu.Unlock()
-				if len(res) == 1 {
-					if opt.ImageIDFile != "" {
-						return ioutil.WriteFile(opt.ImageIDFile, []byte(res[0].ExporterResponse["containerimage.digest"]), 0644)
-					}
-					return nil
-				}
-
-				if pushNames != "" {
-					progress.Write(pw, fmt.Sprintf("merging manifest list %s", pushNames), func() error {
-						descs := make([]specs.Descriptor, 0, len(res))
-
-						for _, r := range res {
-							s, ok := r.ExporterResponse["containerimage.digest"]
-							if ok {
-								descs = append(descs, specs.Descriptor{
-									Digest:    digest.Digest(s),
-									MediaType: images.MediaTypeDockerSchema2ManifestList,
-									Size:      -1,
-								})
-							}
-						}
-						if len(descs) > 0 {
-							itpull := imagetools.New(imagetools.Opt{
-								Auth: auth,
-							})
-
-							names := strings.Split(pushNames, ",")
-							dt, desc, err := itpull.Combine(ctx, names[0], descs)
-							if err != nil {
-								return err
-							}
-							if opt.ImageIDFile != "" {
-								return ioutil.WriteFile(opt.ImageIDFile, []byte(desc.Digest), 0644)
-							}
-							itpush := imagetools.New(imagetools.Opt{
-								Auth: auth,
-							})
-
-							for _, n := range names {
-								nn, err := reference.ParseNormalizedNamed(n)
-								if err != nil {
-									return err
-								}
-								if err := itpush.Push(ctx, nn, desc, dt); err != nil {
-									return err
-								}
-							}
-
-							respMu.Lock()
-							resp[k] = &client.SolveResponse{
-								ExporterResponse: map[string]string{
-									"containerimage.digest": desc.Digest.String(),
-								},
-							}
-							respMu.Unlock()
-						}
-						return nil
-					})
-				}
-				return nil
-			})
-
-			for i, dp := range dps {
-				so := *dp.so
-
-				if multiDriver {
-					for i, e := range so.Exports {
-						switch e.Type {
-						case "oci", "tar":
-							return errors.Errorf("%s for multi-node builds currently not supported", e.Type)
-						case "image":
-							if pushNames == "" && e.Attrs["push"] != "" {
-								if ok, _ := strconv.ParseBool(e.Attrs["push"]); ok {
-									pushNames = e.Attrs["name"]
-									if pushNames == "" {
-										return errors.Errorf("tag is needed when pushing to registry")
-									}
-									names, err := toRepoOnly(e.Attrs["name"])
-									if err != nil {
-										return err
-									}
-									e.Attrs["name"] = names
-									e.Attrs["push-by-digest"] = "true"
-									so.Exports[i].Attrs = e.Attrs
-								}
-							}
-						}
-					}
-				}
-
-				func(i int, dp driverPair, so client.SolveOpt) {
-					pw := mw.WithPrefix(k, multiTarget)
-
-					// TODO this is a little mess - could use some refactoring
-					var c *client.Client
-					for _, client := range clients[drivers[dp.driverIndex].Name] {
-						c = client
-						break
-					}
-
-					var statusCh chan *client.SolveStatus
-					if pw != nil {
-						pw = progress.ResetTime(pw)
-						statusCh = pw.Status()
-						eg.Go(func() error {
-							<-pw.Done()
-							return pw.Err()
-						})
-					}
-
-					eg.Go(func() error {
-						defer wg.Done()
-						rr, err := c.Solve(ctx, nil, so, statusCh)
-						if err != nil {
-							// Try to give a slightly more helpful error message if the use
-							// hasn't wired up a kubernetes secret for push/pull properly
-							if strings.Contains(strings.ToLower(err.Error()), "401 unauthorized") {
-								msg := drivers[dp.driverIndex].Driver.GetAuthHintMessage()
-								return errors.Wrap(err, msg)
-							}
-							return err
-						}
-						res[i] = rr
-						return nil
-					})
-
-				}(i, dp, so)
 			}
-
-			return nil
-		}(k)
+			// TODO - Push scenario?  (or is this a "not reached" scenario now?)
+			return nil, nil, fmt.Errorf("raw push scenario not yet supported")
+		})
 		if err != nil {
 			return nil, err
 		}
+		defers = append(defers, release)
+		solveOpts[i] = solveOpt
 	}
 
-	if err := eg.Wait(); err != nil {
+	var respMu sync.Mutex
+
+	// TODO this is WRONG
+	multiTarget := false // TODO experiment with true/false on this to see differing behavior of the progress writer...
+
+	wg := &sync.WaitGroup{}
+	wg.Add(solveCount)
+
+	var pushNames string
+
+	errGroup.Go(func() error {
+		pw := multiWriter.WithPrefix("default", false)
+		defer close(pw.Status())
+		wg.Wait()
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		respMu.Lock()
+		resp = res[0]
+		respMu.Unlock()
+		if len(res) == 1 {
+			// TODO - this is the single solve scenario
+			if opt.ImageIDFile != "" {
+				return ioutil.WriteFile(opt.ImageIDFile, []byte(res[0].ExporterResponse["containerimage.digest"]), 0644)
+			}
+			return nil
+		}
+		// TODO - this is the multi-solve scenario (aka, multiple nodes building, where the client needs to stitch things together)
+
+		if pushNames != "" {
+			progress.Write(pw, fmt.Sprintf("merging manifest list %s", pushNames), func() error {
+				descs := make([]specs.Descriptor, 0, len(res))
+				for _, r := range res {
+					s, ok := r.ExporterResponse["containerimage.digest"]
+					if ok {
+						descs = append(descs, specs.Descriptor{
+							Digest:    digest.Digest(s),
+							MediaType: images.MediaTypeDockerSchema2ManifestList,
+							Size:      -1,
+						})
+					}
+				}
+				if len(descs) > 0 {
+					itpull := imagetools.New(imagetools.Opt{
+						Auth: auth,
+					})
+
+					names := strings.Split(pushNames, ",")
+					dt, desc, err := itpull.Combine(ctx, names[0], descs)
+					if err != nil {
+						return err
+					}
+					if opt.ImageIDFile != "" {
+						return ioutil.WriteFile(opt.ImageIDFile, []byte(desc.Digest), 0644)
+					}
+					itpush := imagetools.New(imagetools.Opt{
+						Auth: auth,
+					})
+
+					for _, n := range names {
+						nn, err := reference.ParseNormalizedNamed(n)
+						if err != nil {
+							return err
+						}
+						if err := itpush.Push(ctx, nn, desc, dt); err != nil {
+							return err
+						}
+					}
+
+					respMu.Lock()
+					resp = &client.SolveResponse{
+						ExporterResponse: map[string]string{
+							"containerimage.digest": desc.Digest.String(),
+						},
+					}
+					respMu.Unlock()
+				}
+				return nil
+			})
+		}
+		return nil
+	})
+
+	for i, so := range solveOpts {
+		// TODO - this probably needs some refinement for multi-arch multi-node vs. single node multi-arch via cross compilation
+		solveOpt := so
+		i := i
+		if multiPlatformRequested {
+			for _, exportEntry := range solveOpt.Exports {
+				switch exportEntry.Type {
+				case "oci", "tar":
+					return nil, errors.Errorf("%s for multi-node builds currently not supported", exportEntry.Type)
+				case "image":
+					if pushNames == "" && exportEntry.Attrs["push"] != "" {
+						if ok, _ := strconv.ParseBool(exportEntry.Attrs["push"]); ok {
+							pushNames = exportEntry.Attrs["name"]
+							if pushNames == "" {
+								return nil, errors.Errorf("tag is needed when pushing to registry")
+							}
+							names, err := toRepoOnly(exportEntry.Attrs["name"])
+							if err != nil {
+								return nil, err
+							}
+							exportEntry.Attrs["name"] = names
+							exportEntry.Attrs["push-by-digest"] = "true"
+							solveOpt.Exports[i].Attrs = exportEntry.Attrs
+						}
+					}
+				}
+			}
+		}
+
+		// TODO this needs further work around picking the right nodes...
+		var c *client.Client
+		var name string
+		if multiNodeRequested {
+			// TODO refine algorithm to select node (spread work around, etc.)
+			c, name, err = drv.Client(ctx, requestedPlatforms[i])
+			if err != nil {
+				// TODO consider hardening for flaky builders
+				return nil, err
+			}
+		} else {
+			c = drvClient
+			name = "default"
+		}
+		pw = multiWriter.WithPrefix(name, multiTarget)
+
+		var statusCh chan *client.SolveStatus
+		if pw != nil {
+			pw = progress.ResetTime(pw)
+			statusCh = pw.Status()
+			errGroup.Go(func() error {
+				<-pw.Done()
+				return pw.Err()
+			})
+		}
+
+		errGroup.Go(func() error {
+			defer wg.Done()
+			// TODO - make sure we don't have a stack goof here and pass in the wrong solveOpt...
+			rr, err := c.Solve(ctx, nil, *solveOpt, statusCh)
+			if err != nil {
+				// Try to give a slightly more helpful error message if the use
+				// hasn't wired up a kubernetes secret for push/pull properly
+				if strings.Contains(strings.ToLower(err.Error()), "401 unauthorized") {
+					msg := drv.GetAuthHintMessage()
+					return errors.Wrap(err, msg)
+				}
+				return err
+			}
+			// TODO - resp and res are likely still not quite right...
+			res[i] = rr
+			return nil
+		})
+	}
+	if err := errGroup.Wait(); err != nil {
 		return nil, err
 	}
 
@@ -888,8 +720,8 @@ func LoadInputs(inp Inputs, target *client.SolveOpt) (func(), error) {
 	return release, nil
 }
 
-func notSupported(d driver.Driver, f driver.Feature) error {
-	return errors.Errorf("%s feature is currently not supported for %s driver. Please switch to a different driver (eg. \"kubectl buildkit create --use\")", f, d.Factory().Name())
+func notSupported(f driver.Feature) error {
+	return errors.Errorf("%s feature is currently not supported. See \"kubectl buildkit create --help\"", f)
 }
 
 type dockerLoadCallback func(name string) (io.WriteCloser, func(), error)

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/moby/buildkit/client"
+	specs "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	"github.com/vmware-tanzu/buildkit-cli-for-kubectl/pkg/driver"
@@ -272,13 +273,26 @@ func (d *Driver) wait(ctx context.Context, sub progress.SubLogger) error {
 
 						sub.Log(1, []byte(fmt.Sprintf("WARN: initial attempt to deploy configured for the %s runtime failed, retrying with %s\n", attemptedRuntime, runtime)))
 						d.InitConfig.DriverOpts["runtime"] = runtime
-						d.InitConfig.DriverOpts["worker"] = "auto"
+						// Leave the users initial intent on worker configuration
+						if d.InitConfig.DriverOpts["worker"] == "" {
+							d.InitConfig.DriverOpts["worker"] = "auto"
+						}
 						err = d.initDriverFromConfig() // This will toggle userSpecifiedRuntime to true to prevent cycles
 						if err != nil {
 							return err
 						}
 						// Instead of updating, we'll just delete the deployment and re-create
-						if err := d.deploymentClient.Delete(ctx, d.deployment.Name, metav1.DeleteOptions{}); err != nil {
+						zero64 := int64(0)
+						if err := d.deploymentClient.Delete(ctx, d.deployment.Name, metav1.DeleteOptions{
+							// Ensure we only delete the deployment we recognize to avoid racing with other CLIs
+							Preconditions: &metav1.Preconditions{
+								UID:             &depl.UID,
+								ResourceVersion: &depl.ResourceVersion,
+							},
+							GracePeriodSeconds: &zero64,
+						}); err != nil {
+							// We may be racing with another CLI - Reset the userSpecifiedRuntime in case
+							d.userSpecifiedRuntime = false
 							return errors.Wrapf(err, "error while calling deploymentClient.Delete for %q", d.deployment.Name)
 						}
 
@@ -308,6 +322,8 @@ func (d *Driver) wait(ctx context.Context, sub progress.SubLogger) error {
 						depl, err = d.deploymentClient.Create(ctx, d.deployment, metav1.CreateOptions{})
 						if err != nil {
 							// If we fail to re-create, bail out entirely
+							// We may be racing with another CLI - Reset the userSpecifiedRuntime in case
+							d.userSpecifiedRuntime = false
 							return fmt.Errorf("failed to redeploy with updated settings: %w", err)
 						}
 						// Keep on waiting and hope this variation works.
@@ -349,10 +365,20 @@ func (d *Driver) Info(ctx context.Context) (*driver.Info, error) {
 		return nil, err
 	}
 	var dynNodes []store.Node
-	for _, p := range pods {
+	for _, pod := range pods {
+		var platforms []specs.Platform
+		workers, err := d.GetWorkersForPod(ctx, pod, 2000*time.Millisecond)
+		if err == nil {
+			if len(workers) == 1 {
+				platforms = workers[0].Platforms
+			}
+		} else {
+			logrus.Debugf("failed to retrieve workers for pod %s: %s", pod.Name, err)
+		}
+
 		node := store.Node{
-			Name: p.Name,
-			// Other fields are unset (TODO: detect real platforms)
+			Name:      pod.Name,
+			Platforms: platforms,
 		}
 		dynNodes = append(dynNodes, node)
 	}
@@ -378,30 +404,35 @@ func (d *Driver) Rm(ctx context.Context, force bool) error {
 	return nil
 }
 
-func (d *Driver) Client(ctx context.Context) (*client.Client, string, error) {
-	restClient := d.clientset.CoreV1().RESTClient()
-	restClientConfig, err := d.KubeClientConfig.ClientConfig()
+func (d *Driver) Client(ctx context.Context, platforms ...specs.Platform) (*client.Client, string, error) {
+	pod, err := d.podChooser.ChoosePod(ctx, d, platforms...)
 	if err != nil {
 		return nil, "", err
 	}
-	pod, err := d.podChooser.ChoosePod(ctx)
-	if err != nil {
-		return nil, "", err
-	}
+	client, err := d.GetClientForPod(ctx, pod)
+	return client, pod.Name, err
+}
+
+func (d *Driver) GetClientForPod(ctx context.Context, pod *corev1.Pod) (*client.Client, error) {
 	if len(pod.Spec.Containers) == 0 {
-		return nil, "", errors.Errorf("pod %s does not have any container", pod.Name)
+		return nil, errors.Errorf("pod %s does not have any container", pod.Name)
 	}
+	restClient := d.clientset.CoreV1().RESTClient()
+	restClientConfig, err := d.InitConfig.KubeClientConfig.ClientConfig()
+	if err != nil {
+		return nil, err
+	}
+
 	containerName := pod.Spec.Containers[0].Name
 	cmd := []string{"buildctl", "dial-stdio"}
 	conn, err := execconn.ExecConn(restClient, restClientConfig,
 		pod.Namespace, pod.Name, containerName, cmd)
 	if err != nil {
-		return nil, "", err
+		return nil, err
 	}
-	client, err := client.New(ctx, "", client.WithDialer(func(string, time.Duration) (net.Conn, error) {
+	return client.New(ctx, "", client.WithDialer(func(string, time.Duration) (net.Conn, error) {
 		return conn, nil
 	}))
-	return client, pod.Name, err
 }
 
 // TODO debugging concurrent access problems
@@ -475,13 +506,23 @@ func (d *Driver) List(ctx context.Context) ([]driver.Builder, error) {
 			return nil, err
 		}
 		for _, p := range pods {
+			var platforms []specs.Platform
+			workers, err := d.GetWorkersForPod(ctx, p, 500*time.Millisecond) // Short fuse, skip any failures
+			if err == nil {
+				if len(workers) == 1 {
+					platforms = workers[0].Platforms
+				}
+			} else {
+				logrus.Debugf("failed to retrieve workers for pod %s: %s", p.Name, err)
+			}
+
 			node := driver.Node{
 				// TODO this isn't ideal - Need a good way to translate between pod name and node hostname
-				//Name:   p.Spec.NodeName,
+				NodeName: p.Spec.NodeName,
 				//Name:   p.Status.HostIP,
-				Name:   p.Name,
-				Status: p.Status.Message, // TODO - this seems to be blank, need to look at kubectl CLI magic...
-				// Other fields are unset (TODO: detect real platforms)
+				Name:      p.Name,
+				Status:    string(p.Status.Phase), // TODO - make this a bit smarter
+				Platforms: platforms,
 			}
 			builder.Nodes = append(builder.Nodes, node)
 		}
@@ -514,7 +555,7 @@ func (d *Driver) Features() map[driver.Feature]bool {
 	// Query the pod to figure out the runtime
 
 	// TODO how will this work for multi-pod deployments?
-	pod, err := d.podChooser.ChoosePod(context.TODO())
+	pod, err := d.podChooser.ChoosePod(context.TODO(), d)
 	if err == nil && len(pod.Spec.Containers) > 0 && !isRootless(pod.ObjectMeta.Labels["rootless"]) {
 		switch pod.ObjectMeta.Labels["runtime"] {
 		case "containerd":
@@ -537,4 +578,32 @@ func (d *Driver) GetAuthWrapper(secretName string) imagetools.Auth {
 		driver: d,
 		name:   secretName,
 	}
+}
+
+func (d *Driver) GetName() string {
+	return d.Name
+}
+
+func (d *Driver) GetWorkersForPod(ctx context.Context, pod *corev1.Pod, timeout time.Duration) ([]*client.WorkerInfo, error) {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	restClient := d.clientset.CoreV1().RESTClient()
+	restClientConfig, err := d.KubeClientConfig.ClientConfig()
+	if err != nil {
+		return nil, err
+	}
+	containerName := pod.Spec.Containers[0].Name
+	cmd := []string{"buildctl", "dial-stdio"}
+	conn, err := execconn.ExecConn(restClient, restClientConfig,
+		pod.Namespace, pod.Name, containerName, cmd)
+	if err != nil {
+		return nil, err
+	}
+	client, err := client.New(ctx, "", client.WithDialer(func(string, time.Duration) (net.Conn, error) {
+		return conn, nil
+	}))
+	if err != nil {
+		return nil, err
+	}
+	return client.ListWorkers(ctx)
 }
