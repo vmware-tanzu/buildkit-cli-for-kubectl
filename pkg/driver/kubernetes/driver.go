@@ -3,9 +3,11 @@
 package kubernetes
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"net"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -25,8 +27,10 @@ import (
 	kubeerrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/kubernetes/scheme"
 	clientappsv1 "k8s.io/client-go/kubernetes/typed/apps/v1"
 	clientcorev1 "k8s.io/client-go/kubernetes/typed/core/v1"
+	"k8s.io/client-go/tools/remotecommand"
 )
 
 const (
@@ -278,7 +282,17 @@ func (d *Driver) wait(ctx context.Context, sub progress.SubLogger) error {
 							return err
 						}
 						// Instead of updating, we'll just delete the deployment and re-create
-						if err := d.deploymentClient.Delete(ctx, d.deployment.Name, metav1.DeleteOptions{}); err != nil {
+						zero64 := int64(0)
+						if err := d.deploymentClient.Delete(ctx, d.deployment.Name, metav1.DeleteOptions{
+							// Ensure we only delete the deployment we recognize to avoid racing with other CLIs
+							Preconditions: &metav1.Preconditions{
+								UID:             &depl.UID,
+								ResourceVersion: &depl.ResourceVersion,
+							},
+							GracePeriodSeconds: &zero64,
+						}); err != nil {
+							// We may be racing with another CLI - Reset the userSpecifiedRuntime in case
+							d.userSpecifiedRuntime = false
 							return errors.Wrapf(err, "error while calling deploymentClient.Delete for %q", d.deployment.Name)
 						}
 
@@ -308,6 +322,8 @@ func (d *Driver) wait(ctx context.Context, sub progress.SubLogger) error {
 						depl, err = d.deploymentClient.Create(ctx, d.deployment, metav1.CreateOptions{})
 						if err != nil {
 							// If we fail to re-create, bail out entirely
+							// We may be racing with another CLI - Reset the userSpecifiedRuntime in case
+							d.userSpecifiedRuntime = false
 							return fmt.Errorf("failed to redeploy with updated settings: %w", err)
 						}
 						// Keep on waiting and hope this variation works.
@@ -453,6 +469,55 @@ func (d *Driver) RuntimeSockProxy(ctx context.Context, name string) (net.Conn, e
 
 	return nil, fmt.Errorf("no available builder pods for %s", name)
 
+}
+
+func (d *Driver) GetVersion(ctx context.Context) (string, error) {
+	restClient := d.clientset.CoreV1().RESTClient()
+	restClientConfig, err := d.KubeClientConfig.ClientConfig()
+	if err != nil {
+		return "", err
+	}
+	pod, err := d.podChooser.ChoosePod(ctx)
+	if err != nil {
+		return "", err
+	}
+	if len(pod.Spec.Containers) == 0 {
+		return "", errors.Errorf("pod %s does not have any container", pod.Name)
+	}
+	containerName := pod.Spec.Containers[0].Name
+	cmd := []string{"buildkitd", "--version"}
+	buf := &bytes.Buffer{}
+
+	req := restClient.
+		Post().
+		Namespace(pod.Namespace).
+		Resource("pods").
+		Name(pod.Name).
+		SubResource("exec").
+		VersionedParams(&corev1.PodExecOptions{
+			Container: containerName,
+			Command:   cmd,
+			Stdin:     false,
+			Stdout:    true,
+			Stderr:    true,
+			TTY:       false,
+		}, scheme.ParameterCodec)
+	u := req.URL()
+	exec, err := remotecommand.NewSPDYExecutor(restClientConfig, "POST", u)
+	if err != nil {
+		return "", err
+	}
+	// TODO how to timeout if something goes bad...?
+	serr := exec.Stream(remotecommand.StreamOptions{
+		Stdout: buf,
+		Stderr: os.Stderr,
+		Tty:    false,
+	})
+	if serr != nil {
+		return "", err
+	}
+
+	return strings.TrimSpace(buf.String()), err
 }
 
 func (d *Driver) List(ctx context.Context) ([]driver.Builder, error) {

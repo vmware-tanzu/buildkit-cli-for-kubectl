@@ -70,6 +70,7 @@ type Driver interface {
 	Features() map[Feature]bool
 	List(ctx context.Context) ([]Builder, error)
 	RuntimeSockProxy(ctx context.Context, name string) (net.Conn, error)
+	GetVersion(ctx context.Context) (string, error)
 
 	// TODO - do we really need both?  Seems like some cleanup needed here...
 	GetAuthWrapper(string) imagetools.Auth
@@ -111,7 +112,7 @@ func Boot(ctx context.Context, d Driver, pw progress.Writer) (*client.Client, st
 				if pw != nil {
 					pw.Status() <- s
 				}
-			}); err != nil && (strings.Contains(err.Error(), "already exists") || strings.Contains(err.Error(), "not found")) {
+			}); err != nil && (strings.Contains(err.Error(), "already exists") || strings.Contains(err.Error(), "not found") || strings.Contains(err.Error(), "does not match")) {
 				// This most likely means another build is running in parallel
 				// Give it just enough time to finish creating resources then retry
 				time.Sleep(25 * time.Millisecond * time.Duration(1+rand.Int63n(39))) // 25 - 1000 ms

@@ -52,7 +52,7 @@ func addCommands(cmd *cobra.Command, streams genericclioptions.IOStreams) {
 		//stopCmd(streams, opts),
 		//installCmd(streams),
 		//uninstallCmd(streams),
-		versionCmd(streams),
+		versionCmd(streams, opts),
 		//pruneCmd(streams, opts),
 		//duCmd(streams, opts),
 		//imagetoolscmd.RootCmd(streams),
